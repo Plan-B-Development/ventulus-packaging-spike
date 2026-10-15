@@ -1,0 +1,117 @@
+# Throwaway experiment for Ventulus DEC-499 phase 0. See README.md.
+name: spike
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: spike
+  cancel-in-progress: false
+
+jobs:
+  build-daemon:
+    runs-on: ubuntu-24.04
+    container: debian:13
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: bash spike/build-daemon.sh
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: daemon
+          path: out/
+          retention-days: 3
+
+  apt:
+    needs: build-daemon
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: daemon
+          path: out
+      - run: bash spike/apt.sh
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+  dnf:
+    needs: build-daemon
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+    outputs:
+      page_url: ${{ steps.v2.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: daemon
+          path: out
+      - run: bash spike/dnf.sh build 1
+      - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        with:
+          name: pages-v1
+          path: site
+      - id: v1
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1
+        with:
+          artifact_name: pages-v1
+      - run: bash spike/dnf.sh client-v1 "${{ steps.v1.outputs.page_url }}"
+        if: ${{ !cancelled() }}
+      - run: bash spike/dnf.sh build 2
+        if: ${{ !cancelled() }}
+      - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        if: ${{ !cancelled() }}
+        with:
+          name: pages-v2
+          path: site
+      - id: v2
+        if: ${{ !cancelled() }}
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1
+        with:
+          artifact_name: pages-v2
+      - run: bash spike/dnf.sh client-v2 "${{ steps.v2.outputs.page_url }}"
+        if: ${{ !cancelled() }}
+
+  systemd:
+    needs: build-daemon
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        image: ['debian:13', 'ubuntu:26.04', 'fedora:44']
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: daemon
+          path: out
+      - run: sudo --preserve-env=GITHUB_STEP_SUMMARY bash spike/systemd.sh "${{ matrix.image }}"
+
+  kvm:
+    needs: dnf
+    if: ${{ !cancelled() && needs.dnf.outputs.page_url != '' }}
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: bash spike/kvm.sh "${{ needs.dnf.outputs.page_url }}"
+
+  gui:
+    runs-on: ubuntu-24.04
+    container: ${{ matrix.image }}
+    strategy:
+      fail-fast: false
+      matrix:
+        image: ['debian:13', 'ubuntu:26.04', 'fedora:44']
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: bash spike/gui.sh
