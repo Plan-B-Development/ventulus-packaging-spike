@@ -25,6 +25,16 @@ case $distro in
                 python3-pyqtgraph python3-numpy python3-httpx python3-colorama \
                 python3-pytest python3-pytestqt python3-pytest-timeout python3-yaml \
                 libegl1 libgl1 libxkbcommon0 fonts-dejavu-core fish zsh
+            # Run 1: pyqtgraph needs PySide6.QtOpenGL on Ubuntu, and the app icon
+            # (SVG) was null on Debian. Install whichever of these exist.
+            local extra=() p
+            for p in python3-pyside6.qtopengl python3-pyside6.qtopenglwidgets qt6-svg-plugins; do
+                apt-cache show "$p" >/dev/null 2>&1 && extra+=("$p")
+            done
+            echo "extra packages available: ${extra[*]}"
+            apt-get install -y -q --no-install-recommends "${extra[@]}"
+            echo "Qt6 SVG packages: $(apt-cache search --names-only 'qt6.*svg' | cut -d' ' -f1 | tr '\n' ' ')"
+            echo "python3-pyqtgraph Depends: $(apt-cache depends python3-pyqtgraph | grep -E '^\s+(\|)?Depends' | tr -s ' ' | tr '\n' ' ')"
         }
         ;;
     fedora*)
@@ -33,6 +43,7 @@ case $distro in
                 python3-pyqtgraph python3-numpy python3-httpx python3-colorama \
                 python3-pytest python3-pytest-qt python3-pytest-timeout python3-pyyaml \
                 mesa-libEGL mesa-libGL libxkbcommon dejavu-sans-fonts fish zsh
+            echo "python3-pyqtgraph requires: $(rpm -q --requires python3-pyqtgraph | tr '\n' ' ')"
         }
         ;;
 esac
@@ -42,6 +53,12 @@ note "G1: $(python3 -c 'import sys, PySide6, pyqtgraph, numpy, httpx; print(f"Py
 note "G3: Qt bindings installed: $(python3 -c 'import importlib.util as u; print(" ".join(m for m in ("PyQt5", "PyQt6", "PySide2", "PySide6") if u.find_spec(m)))' 2>&1)"
 
 check "fetch ventulus v5.1.0" git clone -q --depth 1 --branch v5.1.0 https://github.com/Plan-B-Development/ventulus.git /tmp/ventulus
+# Run 1: without installed metadata the GUI's version is "dev", which turns the
+# version-floor checks off, so their two tests fail. A package installs this
+# .dist-info; the shim gives a checkout the same answer.
+mkdir -p /tmp/ventulus/src/ventulus-5.1.0.dist-info
+printf 'Metadata-Version: 2.1\nName: ventulus\nVersion: 5.1.0\n' > /tmp/ventulus/src/ventulus-5.1.0.dist-info/METADATA
+note "G2: GUI version as the suite sees it: $(cd /tmp/ventulus && PYTHONPATH=src python3 -c 'from ventulus.constants import APP_VERSION; print(APP_VERSION)' 2>&1 | tail -1)"
 useradd -m -s /bin/bash tester 2>/dev/null || true
 chown -R tester: /tmp/ventulus
 check "G2: the suite passes (offscreen, as an unprivileged user)" su tester -c \

@@ -62,9 +62,14 @@ wait_ssh() {
     return 1
 }
 reboot_guest() {
+    local before after
+    before=$(g 'cat /proc/sys/kernel/random/boot_id' </dev/null)
     g 'sudo systemctl reboot' </dev/null || true
     sleep 15
-    wait_ssh
+    wait_ssh || return 1
+    after=$(g 'cat /proc/sys/kernel/random/boot_id' </dev/null)
+    echo "boot_id $before → $after"
+    [ -n "$after" ] && [ "$before" != "$after" ]
 }
 no_ventulus_avcs() {
     local out

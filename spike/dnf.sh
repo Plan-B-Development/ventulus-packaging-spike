@@ -106,13 +106,20 @@ client_v1() {
     note "D3: v1 repomd.xml headers: $(headers "$url")"
     docker run -d --name "$client" fedora:44 sleep infinity >/dev/null
     repo_file "$url" xd-spike RPM-GPG-KEY-xd-spike | docker exec -i "$client" tee /etc/yum.repos.d/xd-spike.repo
-    repo_file "$url" xd-wrong RPM-GPG-KEY-wrong | sed 's/^enabled=1/enabled=0/' \
-        | docker exec -i "$client" tee /etc/yum.repos.d/xd-wrong.repo
     check "D1: dnf5 installs xd-spike-daemon 1.0 with gpgcheck and repo_gpgcheck" \
         docker exec "$client" bash -euc 'dnf --version | head -2; dnf -y install xd-spike-daemon \
             && rpm -q xd-spike-daemon && ventulusd --version && rpm -q --qf "%{SIGPGP:pgpsig}\n" xd-spike-daemon'
-    check "D1: repo_gpgcheck refuses repomd.xml signed by another key (must fail)" \
-        docker exec "$client" bash -c '! dnf -y --repo xd-wrong --enablerepo xd-wrong makecache --refresh'
+    # The same repository under a key that did not sign it. It must fail, and on
+    # the signature: run 1's version of this "passed" on an argument error.
+    repo_file "$url" xd-wrong RPM-GPG-KEY-wrong | docker exec -i "$client" tee /etc/yum.repos.d/xd-wrong.repo
+    refused() {
+        local out rc=0
+        out=$(docker exec "$client" dnf -y --repo xd-wrong makecache --refresh 2>&1) || rc=$?
+        echo "$out" | tail -15
+        docker exec "$client" rm -f /etc/yum.repos.d/xd-wrong.repo
+        [ "$rc" != 0 ] && echo "$out" | grep -qiE 'signature|openpgp|gpg|key'
+    }
+    check "D1: repo_gpgcheck refuses repomd.xml signed by another key (fails, on the signature)" refused
     finish
 }
 

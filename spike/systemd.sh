@@ -86,7 +86,11 @@ replayed() {
 }
 check "S2: systemctl stop replays the record" replayed 'systemctl stop ventulusd'
 check "S2: systemctl restart replays the record" replayed 'systemctl restart ventulusd'
-check "S2: SIGKILL replays the record (ExecStopPost after a kill)" replayed 'systemctl kill -s KILL ventulusd'
+# Only the main process, as a crash or the OOM killer would: `systemctl kill`
+# signals the whole cgroup by default, and in run 1 that also killed the
+# ExecStopPost it had just started ("Control process exited, code=killed").
+check "S2: SIGKILL of the main process replays the record (ExecStopPost after a crash)" \
+    replayed 'kill -KILL "$(systemctl show -p MainPID --value ventulusd)"'
 check "S2: after SIGKILL, Restart=on-failure brings the daemon back" podman exec "$c" bash -c '
     for i in $(seq 20); do systemctl is-active -q ventulusd && exit 0; sleep 1; done; systemctl status ventulusd --no-pager; exit 1'
 note "S2: $(podman exec "$c" systemctl show ventulusd -p NRestarts | tr '\n' ' ')"

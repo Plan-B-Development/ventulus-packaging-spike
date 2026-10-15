@@ -47,7 +47,11 @@ index() {
 }
 
 repo=$(mktemp -d)
-cp "$debs/xd-spike-daemon_1.0-1_amd64.deb" "$debs"/xd-spike-odd_*.deb "$repo/"
+cp "$debs/xd-spike-daemon_1.0-1_amd64.deb" "$repo/"
+# Run 1 showed GitHub stores '~' in an asset name as '.'. The .deb keeps its
+# version (1.0~rc1+b1-1) but is uploaded under the name GitHub would give it, so
+# Filename: matches the asset; this leaves '+' (sent by apt as %2b) under test.
+cp "$debs/xd-spike-odd_1.0~rc1+b1-1_all.deb" "$repo/xd-spike-odd_1.0.rc1+b1-1_all.deb"
 index "$repo"
 
 gh release delete "$TAG" --yes --cleanup-tag >/dev/null 2>&1 || true
@@ -56,7 +60,7 @@ check "create release $TAG" gh release create "$TAG" --title "APT spike (throwaw
 check "upload v1 repository" gh release upload "$TAG" "$repo"/* xd-spike.gpg
 
 stored=$(gh release view "$TAG" --json assets --jq '.assets[].name' | grep '^xd-spike-odd' || true)
-note "A6: asset uploaded as xd-spike-odd_1.0~rc1+b1-1_all.deb is stored as: $stored"
+note "A6: asset uploaded as xd-spike-odd_1.0.rc1+b1-1_all.deb is stored as: $stored"
 
 redirect_host() {
     curl -s -o /dev/null -w '%{http_code} %{redirect_url}' "${BASE}InRelease" | sed -E 's|(https://[^/]+)/.*|\1/…|'
@@ -91,10 +95,14 @@ for img in "${clients[@]}"; do
     check "$img A3: install xd-spike-daemon 1.0-1 and run it" \
         docker exec "$name" bash -euc 'DEBIAN_FRONTEND=noninteractive apt-get install -y -q xd-spike-daemon \
             && dpkg-query -W xd-spike-daemon && ventulusd --version && ventulus-tray --version'
-    check "$img A6: install the package with ~ and + in its version" \
+    check "$img A6: install the package with ~ and + in its version ('~' renamed in the asset)" \
         docker exec "$name" bash -euc 'DEBIAN_FRONTEND=noninteractive apt-get install -y -q xd-spike-odd \
             && dpkg-query -W xd-spike-odd'
 done
+
+# What a conditional request for InRelease looks like before the republish.
+old_lm=$(curl -sIL "${BASE}InRelease" | tr -d '\r' | grep -i '^last-modified:' | tail -1 | cut -d' ' -f2-)
+note "A4: v1 InRelease Last-Modified as served: ${old_lm:-none}"
 
 # Republish: new .deb first, then the indices, InRelease last (the planned order).
 cp "$debs/xd-spike-daemon_2.0-1_amd64.deb" "$repo/"
@@ -109,10 +117,41 @@ check "replace Release, Release.gpg, InRelease" \
     gh release upload "$TAG" --clobber "$repo/Release" "$repo/Release.gpg" "$repo/InRelease"
 note "A5: index replacement window was $(( $(date +%s) - start )) s"
 
+new_sum=$(sha256sum < "$repo/InRelease")
+fresh=0
+for i in 1 2 3 4 5 6; do
+    [ "$(curl -sfL "${BASE}InRelease" | sha256sum)" = "$new_sum" ] && fresh=$((fresh + 1))
+done
+note "A4: host curl -L right after the republish: new InRelease in $fresh of 6 fetches"
+note "A4: github.com with If-Modified-Since: $old_lm → $(curl -s -o /dev/null -w '%{http_code}' -H "If-Modified-Since: $old_lm" "${BASE}InRelease"); followed → $(curl -sL -o /dev/null -w '%{http_code}' -H "If-Modified-Since: $old_lm" "${BASE}InRelease")"
+note "A4: new InRelease as served: $(curl -sIL "${BASE}InRelease" | tr -d '\r' | grep -iE '^(last-modified|etag|cache-control):' | tr '\n' ' ')"
+
+# seen_after <container>: how long until apt sees 2.0-1, logging the first exchange.
+seen_after() {
+    local name=$1 i
+    for i in $(seq 13); do
+        docker exec "$name" apt-get update -o Debug::Acquire::https=true > "/tmp/$name.update" 2>&1
+        if [ "$i" = 1 ]; then
+            grep -iE '^(GET|If-Modified-Since|HTTP/1.1 [0-9]|Last-Modified|Location|Cache-Control)|apt-repo' \
+                "/tmp/$name.update" | sed -E 's/\?.*//' | grep -v 'deb.debian\|ubuntu.com' | head -24
+        fi
+        if docker exec "$name" apt-cache policy xd-spike-daemon | grep -q 'Candidate: 2.0-1'; then
+            echo "$(( (i - 1) * 15 ))"
+            return 0
+        fi
+        sleep 15
+    done
+    echo never
+}
+
 for img in "${clients[@]}"; do
     name=c-${img//[:.]/-}
-    check "$img A4: apt-get update && upgrade reaches 2.0-1" \
-        docker exec "$name" bash -euc 'apt-get update -q && DEBIAN_FRONTEND=noninteractive apt-get upgrade -y -q \
+    echo "::group::$img A4: apt-get update until 2.0-1 is visible"
+    seen=$(seen_after "$name" | tee /dev/stderr | tail -1)
+    echo "::endgroup::"
+    note "A4 $img: the republish was visible to apt after: $seen s"
+    check "$img A4: apt-get upgrade reaches 2.0-1" \
+        docker exec "$name" bash -euc 'DEBIAN_FRONTEND=noninteractive apt-get upgrade -y -q \
             && test "$(dpkg-query -W -f="\${Version}" xd-spike-daemon)" = 2.0-1'
 done
 
