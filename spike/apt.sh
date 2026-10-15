@@ -128,14 +128,16 @@ note "A4: new InRelease as served: $(curl -sIL "${BASE}InRelease" | tr -d '\r' |
 
 # seen_after <container>: how long until apt sees 2.0-1, logging the first exchange.
 seen_after() {
-    local name=$1 i
+    local name=$1 i policy
     for i in $(seq 13); do
         docker exec "$name" apt-get update -o Debug::Acquire::https=true > "/tmp/$name.update" 2>&1
         if [ "$i" = 1 ]; then
             grep -iE '^(GET|If-Modified-Since|HTTP/1.1 [0-9]|Last-Modified|Location|Cache-Control)|apt-repo' \
                 "/tmp/$name.update" | sed -E 's/\?.*//' | grep -v 'deb.debian\|ubuntu.com' | head -24
         fi
-        if docker exec "$name" apt-cache policy xd-spike-daemon | grep -q 'Candidate: 2.0-1'; then
+        # Captured first: `grep -q` under pipefail failed this test in run 2.
+        policy=$(docker exec "$name" apt-cache policy xd-spike-daemon)
+        if [[ $policy == *"Candidate: 2.0-1"* ]]; then
             echo "$(( (i - 1) * 15 ))"
             return 0
         fi

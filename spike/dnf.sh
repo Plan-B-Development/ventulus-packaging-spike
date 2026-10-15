@@ -62,16 +62,19 @@ build() {
             } | tee /rpms/facts.txt'
     while read -r line; do note "$line"; done < "$rpms/facts.txt"
     cp "$state/RPM-GPG-KEY-xd-spike" "$state/RPM-GPG-KEY-wrong" site/rpm/
+    # A copy whose repomd.xml no longer matches its signature (D1, tampering).
+    cp -r site/rpm site/rpm-tampered
+    sed -i 's|</repomd>|<!-- tampered --></repomd>|' site/rpm-tampered/repodata/repomd.xml
     ls -R site
     finish
 }
 
 repo_file() {
-    local url=$1 id=$2 key=$3
+    local url=$1 id=$2 key=$3 dir=${4:-rpm}
     cat <<EOF
 [$id]
 name=$id (throwaway spike)
-baseurl=${url%/}/rpm/
+baseurl=${url%/}/$dir/
 enabled=1
 gpgcheck=1
 repo_gpgcheck=1
@@ -109,17 +112,30 @@ client_v1() {
     check "D1: dnf5 installs xd-spike-daemon 1.0 with gpgcheck and repo_gpgcheck" \
         docker exec "$client" bash -euc 'dnf --version | head -2; dnf -y install xd-spike-daemon \
             && rpm -q xd-spike-daemon && ventulusd --version && rpm -q --qf "%{SIGPGP:pgpsig}\n" xd-spike-daemon'
-    # The same repository under a key that did not sign it. It must fail, and on
-    # the signature: run 1's version of this "passed" on an argument error.
-    repo_file "$url" xd-wrong RPM-GPG-KEY-wrong | docker exec -i "$client" tee /etc/yum.repos.d/xd-wrong.repo
+    # Negative tests, each in a FRESH client so no earlier import of the right key
+    # can satisfy the check (run 2: dnf5 printed a signature error, then loaded
+    # the metadata and exited 0, in a client that already trusted the right key).
+    #   wrong:    the repository under a key that did not sign it
+    #   tampered: the right key, but repomd.xml no longer matches its signature
+    # Each must fail to load the metadata AND fail to install.
     refused() {
-        local out rc=0
-        out=$(docker exec "$client" dnf -y --repo xd-wrong makecache --refresh 2>&1) || rc=$?
-        echo "$out" | tail -15
-        docker exec "$client" rm -f /etc/yum.repos.d/xd-wrong.repo
-        [ "$rc" != 0 ] && echo "$out" | grep -qiE 'signature|openpgp|gpg|key'
+        local id=$1 key=$2 dir=$3 c="dnf-$1" out rc=0 avail
+        docker run -d --name "$c" fedora:44 sleep infinity >/dev/null
+        repo_file "$url" "$id" "$key" "$dir" | docker exec -i "$c" tee "/etc/yum.repos.d/$id.repo" >/dev/null
+        out=$(docker exec "$c" dnf -y --repo "$id" makecache --refresh 2>&1) || rc=$?
+        echo "$out" | tail -12
+        avail=$(docker exec "$c" dnf -q --repo "$id" repoquery xd-spike-daemon 2>&1 | tail -3)
+        echo "makecache exit $rc; repoquery sees: ${avail:-nothing}"
+        note "D1 $id: makecache exit $rc; repoquery sees: $(echo "${avail:-nothing}" | tr '\n' ' ')"
+        if docker exec "$c" dnf -y --repo "$id" install xd-spike-daemon >/tmp/$c.install 2>&1; then
+            note "D1 $id: dnf INSTALLED the package"
+            return 1
+        fi
+        note "D1 $id: install refused: $(grep -iE 'signature|openpgp|gpg|key|error' /tmp/$c.install | head -2 | tr '\n' ' ' | cut -c1-300)"
+        [ "$rc" != 0 ]
     }
-    check "D1: repo_gpgcheck refuses repomd.xml signed by another key (fails, on the signature)" refused
+    check "D1: metadata signed by another key is refused" refused xd-wrong RPM-GPG-KEY-wrong rpm
+    check "D1: tampered repomd.xml under the right key is refused" refused xd-tampered RPM-GPG-KEY-xd-spike rpm-tampered
     finish
 }
 

@@ -61,6 +61,15 @@ printf 'Metadata-Version: 2.1\nName: ventulus\nVersion: 5.1.0\n' > /tmp/ventulus
 note "G2: GUI version as the suite sees it: $(cd /tmp/ventulus && PYTHONPATH=src python3 -c 'from ventulus.constants import APP_VERSION; print(APP_VERSION)' 2>&1 | tail -1)"
 useradd -m -s /bin/bash tester 2>/dev/null || true
 chown -R tester: /tmp/ventulus
+# Verbose into a file, so a crash names its test (run 2 lost it to `tail`).
 check "G2: the suite passes (offscreen, as an unprivileged user)" su tester -c \
-    'cd /tmp/ventulus && QT_QPA_PLATFORM=offscreen PYTHONPATH=src python3 -m pytest tests -q -p no:cacheprovider --tb=short -o timeout=120 2>&1 | tail -60; exit ${PIPESTATUS[0]}'
+    'cd /tmp/ventulus && QT_QPA_PLATFORM=offscreen PYTHONPATH=src python3 -m pytest tests -v -p no:cacheprovider --tb=short -o timeout=120 > /tmp/pytest.log 2>&1'
+grep -E '^(FAILED|ERROR) |^=+ .*(passed|failed|error).* =+$' /tmp/pytest.log | head -20
+if grep -q 'Fatal Python error' /tmp/pytest.log; then
+    crashed=$(grep -B1 -m1 'Fatal Python error' /tmp/pytest.log | head -1)
+    note "G2: the interpreter crashed; last test line before it: $crashed"
+    grep -A8 -m1 'Fatal Python error' /tmp/pytest.log
+fi
+note "G2: $(grep -E '^=+ .*(passed|failed).* =+$' /tmp/pytest.log | tail -1)"
+tail -40 /tmp/pytest.log
 finish
